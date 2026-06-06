@@ -7,7 +7,7 @@ const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const app = express();
-app.use(cors({ origin: process.env.FRONTEND_URL || '*', credentials: true }));
+app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -44,10 +44,22 @@ const User = mongoose.model('User', userSchema);
 const OTP = mongoose.model('OTP', otpSchema);
 const Notice = mongoose.model('Notice', noticeSchema);
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
-});
+const createTransporter = () => {
+  if (process.env.BREVO_API_KEY) {
+    return nodemailer.createTransport({
+      host: 'smtp-relay.brevo.com',
+      port: 587,
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.BREVO_API_KEY
+      }
+    });
+  }
+  return nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+  });
+};
 
 const auth = async (req, res, next) => {
   try {
@@ -64,30 +76,34 @@ const adminAuth = (req, res, next) => {
   next();
 };
 
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/send-otp', async (req, res) => {
   try {
     const { email } = req.body;
-    if (await User.findOne({ email })) return res.status(400).json({ success: false, message: 'Email already exists' });
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     await OTP.deleteMany({ email });
     await OTP.create({ email, otp });
     console.log(`OTP for ${email}: ${otp}`);
     try {
+      const transporter = createTransporter();
       await transporter.sendMail({
-        from: process.env.EMAIL_USER, to: email,
+        from: process.env.EMAIL_USER,
+        to: email,
         subject: 'Scout Portal OTP',
-        html: `<h2>Scout Portal</h2><p>Your OTP: <strong>${otp}</strong></p><p>Valid 5 minutes.</p>`
+        html: `<h2>🎖️ Scout Portal</h2><p>আপনার OTP কোড: <strong style="font-size:24px">${otp}</strong></p><p>এই কোডটি ৫ মিনিটের জন্য বৈধ।</p>`
       });
+      console.log('Email sent successfully');
     } catch (e) { console.log('Email error:', e.message); }
-    res.json({ success: true, message: 'OTP sent' });
+    res.json({ success: true, message: 'OTP পাঠানো হয়েছে' });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
-app.post('/api/auth/verify-otp', async (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   try {
-    const { email, otp, password, name } = req.body;
-    if (!await OTP.findOne({ email, otp })) return res.status(400).json({ success: false, message: 'Invalid OTP' });
-    const user = await User.create({ email, password: await bcrypt.hash(password, 10), name, isVerified: true });
+    const { email, otp, password, name, phone } = req.body;
+    const otpRecord = await OTP.findOne({ email, otp });
+    if (!otpRecord) return res.status(400).json({ success: false, message: 'OTP সঠিক নয় বা মেয়াদ শেষ' });
+    if (await User.findOne({ email })) return res.status(400).json({ success: false, message: 'ইমেইল আগে থেকে আছে' });
+    const user = await User.create({ email, password: await bcrypt.hash(password, 10), name, phone, isVerified: true });
     await OTP.deleteMany({ email });
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
     res.json({ success: true, token, user: { id: user._id, email: user.email, name: user.name, role: user.role } });
@@ -99,7 +115,7 @@ app.post('/api/auth/login', async (req, res) => {
     const { email, password } = req.body;
     const user = await User.findOne({ email });
     if (!user || !await bcrypt.compare(password, user.password))
-      return res.status(400).json({ success: false, message: 'Invalid credentials' });
+      return res.status(400).json({ success: false, message: 'ইমেইল বা পাসওয়ার্ড ভুল' });
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
     res.json({ success: true, token, user: { id: user._id, email: user.email, name: user.name, role: user.role, status: user.status } });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
@@ -157,8 +173,8 @@ app.get('/api/idcard/:userId', auth, async (req, res) => {
     doc.fontSize(14).fillColor('#1a5276').text('SCOUTS OF BANGLADESH', { align: 'center' });
     doc.moveDown(0.5).fontSize(10).fillColor('#333');
     doc.text(`Name: ${user.name || 'N/A'}`);
-    doc.text(`Email: ${user.email}`);
     doc.text(`Phone: ${user.phone || 'N/A'}`);
+    doc.text(`Email: ${user.email}`);
     doc.text(`Blood Group: ${user.bloodGroup || 'N/A'}`);
     doc.text(`Scout Rank: ${user.scoutRank || 'N/A'}`);
     doc.text(`School: ${user.schoolName || 'N/A'}`);
